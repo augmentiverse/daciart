@@ -1,0 +1,278 @@
+const CONFIG = {
+  target: "assets/targets/mona-lisa.mind",
+  model: "assets/paintings/mona-lisa/mona-lisa.glb",
+  manifest: "content/paintings/mona-lisa.json",
+  initialScale: 0.42,
+  initialRise: 0.18
+};
+
+const state = {
+  mindarThree: null,
+  anchor: null,
+  model: null,
+  spin: false,
+  warmLight: false,
+  targetRise: CONFIG.initialRise,
+  targetScale: CONFIG.initialScale,
+  clock: new THREE.Clock(),
+  manifest: null
+};
+
+const hotspotFallback = {
+  intro: {
+    kicker: "Catalogue",
+    title: "Mona Lisa",
+    body: "Point your camera at the printed Mona Lisa target. When tracking locks, the 3D model will rise from the page."
+  }
+};
+
+async function init() {
+  bindUI();
+  await loadManifest();
+  await startAR();
+}
+
+function bindUI() {
+  document.getElementById("scale-control").addEventListener("input", (event) => {
+    state.targetScale = Number(event.target.value);
+  });
+
+  document.getElementById("height-control").addEventListener("input", (event) => {
+    state.targetRise = Number(event.target.value);
+  });
+
+  document.getElementById("toggle-spin").addEventListener("click", (event) => {
+    state.spin = !state.spin;
+    event.currentTarget.classList.toggle("active", state.spin);
+  });
+
+  document.getElementById("toggle-light").addEventListener("click", (event) => {
+    state.warmLight = !state.warmLight;
+    event.currentTarget.classList.toggle("active", state.warmLight);
+    updateLighting();
+  });
+
+  document.getElementById("reset-view").addEventListener("click", () => {
+    state.spin = false;
+    state.warmLight = false;
+    state.targetRise = CONFIG.initialRise;
+    state.targetScale = CONFIG.initialScale;
+    document.getElementById("scale-control").value = CONFIG.initialScale;
+    document.getElementById("height-control").value = CONFIG.initialRise;
+    document.getElementById("toggle-spin").classList.remove("active");
+    document.getElementById("toggle-light").classList.remove("active");
+    updateLighting();
+  });
+
+  document.getElementById("close-info").addEventListener("click", () => {
+    document.getElementById("info-panel").classList.add("collapsed");
+  });
+
+  document.querySelectorAll(".hotspot").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll(".hotspot").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      showHotspot(button.dataset.hotspot);
+    });
+  });
+}
+
+async function loadManifest() {
+  try {
+    const response = await fetch(CONFIG.manifest);
+    state.manifest = await response.json();
+    hotspotFallback.intro.body = state.manifest.texts.artisticAnalysis;
+  } catch (error) {
+    console.warn("Manifest could not be loaded. Using fallback copy.", error);
+  }
+}
+
+async function startAR() {
+  const root = document.getElementById("ar-root");
+
+  state.mindarThree = new window.MINDAR.IMAGE.MindARThree({
+    container: root,
+    imageTargetSrc: CONFIG.target,
+    filterMinCF: 0.0001,
+    filterBeta: 0.001
+  });
+
+  const { renderer, scene, camera } = state.mindarThree;
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.72);
+  ambient.name = "ambient-light";
+  scene.add(ambient);
+
+  const key = new THREE.DirectionalLight(0xfff2dc, 1.15);
+  key.name = "key-light";
+  key.position.set(1.8, 2.4, 2.2);
+  scene.add(key);
+
+  const fill = new THREE.DirectionalLight(0x9fc4ff, 0.35);
+  fill.name = "fill-light";
+  fill.position.set(-1.4, 0.8, 1.2);
+  scene.add(fill);
+
+  state.anchor = state.mindarThree.addAnchor(0);
+  state.anchor.group.visible = false;
+
+  addAnchorStage(state.anchor.group);
+  await loadModel(state.anchor.group);
+
+  state.anchor.onTargetFound = () => {
+    state.anchor.group.visible = true;
+    setTrackingStatus(true);
+    showHotspot("intro");
+  };
+
+  state.anchor.onTargetLost = () => {
+    setTrackingStatus(false);
+  };
+
+  try {
+    await state.mindarThree.start();
+    document.getElementById("loading-screen").classList.add("hidden");
+    renderer.setAnimationLoop(() => renderFrame(renderer, scene, camera));
+  } catch (error) {
+    showStartupError(error);
+  }
+}
+
+function addAnchorStage(group) {
+  const frameGeometry = new THREE.BoxGeometry(1.04, 1.48, 0.035);
+  const frameMaterial = new THREE.MeshStandardMaterial({
+    color: 0x5a3a1d,
+    roughness: 0.48,
+    metalness: 0.18
+  });
+  const frame = new THREE.Mesh(frameGeometry, frameMaterial);
+  frame.position.z = -0.02;
+  group.add(frame);
+
+  const shadowGeometry = new THREE.PlaneGeometry(1.18, 1.62);
+  const shadowMaterial = new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    transparent: true,
+    opacity: 0.22,
+    side: THREE.DoubleSide
+  });
+  const shadow = new THREE.Mesh(shadowGeometry, shadowMaterial);
+  shadow.position.z = -0.04;
+  group.add(shadow);
+}
+
+async function loadModel(group) {
+  const loader = new THREE.GLTFLoader();
+
+  return new Promise((resolve, reject) => {
+    loader.load(
+      CONFIG.model,
+      (gltf) => {
+        state.model = gltf.scene;
+        state.model.name = "mona-lisa-model";
+        state.model.scale.setScalar(CONFIG.initialScale);
+        state.model.position.set(0, 0, 0);
+        state.model.rotation.set(Math.PI / 2, 0, 0);
+
+        state.model.traverse((child) => {
+          if (!child.isMesh) return;
+          child.castShadow = false;
+          child.receiveShadow = false;
+          if (child.material) {
+            child.material.side = THREE.DoubleSide;
+            child.material.needsUpdate = true;
+          }
+        });
+
+        group.add(state.model);
+        resolve();
+      },
+      undefined,
+      reject
+    );
+  });
+}
+
+function renderFrame(renderer, scene, camera) {
+  const delta = state.clock.getDelta();
+
+  if (state.model) {
+    state.model.scale.lerp(new THREE.Vector3(state.targetScale, state.targetScale, state.targetScale), 0.12);
+    state.model.position.z += (state.targetRise - state.model.position.z) * 0.08;
+
+    if (state.spin) {
+      state.model.rotation.z += delta * 0.55;
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+
+function updateLighting() {
+  const scene = state.mindarThree?.scene;
+  if (!scene) return;
+
+  const key = scene.getObjectByName("key-light");
+  const fill = scene.getObjectByName("fill-light");
+  const ambient = scene.getObjectByName("ambient-light");
+
+  if (state.warmLight) {
+    key.color.set(0xffc27a);
+    key.intensity = 1.45;
+    fill.intensity = 0.12;
+    ambient.intensity = 0.5;
+  } else {
+    key.color.set(0xfff2dc);
+    key.intensity = 1.15;
+    fill.intensity = 0.35;
+    ambient.intensity = 0.72;
+  }
+}
+
+function setTrackingStatus(locked) {
+  const badge = document.getElementById("tracking-status");
+  badge.textContent = locked ? "Locked" : "Searching";
+  badge.classList.toggle("locked", locked);
+  badge.classList.toggle("searching", !locked);
+}
+
+function showHotspot(id) {
+  const panel = document.getElementById("info-panel");
+  const hotspot = getHotspotContent(id);
+  document.getElementById("panel-kicker").textContent = hotspot.kicker;
+  document.getElementById("panel-title").textContent = hotspot.title;
+  document.getElementById("panel-body").textContent = hotspot.body;
+  panel.classList.remove("collapsed");
+}
+
+function getHotspotContent(id) {
+  if (id === "intro") return hotspotFallback.intro;
+
+  const found = state.manifest?.hotspots?.find((item) => item.id === id);
+  if (!found) {
+    return {
+      kicker: "Hotspot",
+      title: "Mona Lisa",
+      body: "This interpretive layer is ready for future content."
+    };
+  }
+
+  return {
+    kicker: found.category.replaceAll("-", " "),
+    title: found.label,
+    body: found.body
+  };
+}
+
+function showStartupError(error) {
+  console.error(error);
+  const screen = document.getElementById("loading-screen");
+  screen.classList.remove("hidden");
+  screen.querySelector("h1").textContent = "Camera AR could not start";
+  screen.querySelector("p").textContent =
+    "Use HTTPS, allow camera access, and open this from GitHub Pages or a local web server. File URLs cannot run camera WebAR.";
+}
+
+window.addEventListener("load", init);
